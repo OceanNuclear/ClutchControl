@@ -5,7 +5,7 @@ from tkinter import ttk
 import numpy as np
 
 FRAME_RATE = 60
-FordFiesta_ratio = {1:100, 2:200, 3:300}  # wheel diameter * gearing ratio
+FordFiesta_ratio = {}  # wheel diameter * gearing ratio
 motorcycle_ratio = {
     1:8/8000,
     2:20/8000,
@@ -14,10 +14,11 @@ motorcycle_ratio = {
     5:61/8000,
 }
 motorcycle_friction_coefs = {
-    "wheel_speed": [0.00005, 0, 0.2],
+    "wheel_speed": [0.0005, 0, 5],
     "crank_rpm": [0.5/10000, 0.5, 300],  # https://www.desmos.com/calculator/mwtoacy0bl
     "clutch": [25000, 15000]
 }
+
 
 class DriveTrainSimulator:
 
@@ -32,16 +33,16 @@ class DriveTrainSimulator:
         self.root.title("Linear driving simulator")
         self.root.geometry("550x450")
         self.root.configure(bg="white")
-        self.frame_dt = int(round(1000/frame_rate))
+        self.frame_dt = round(1000/frame_rate)*0.001
 
         # init values
         self.drive_ratio = drive_ratio
         self.friction_coefs = {friction_name: [c*self.frame_dt for c in coef_tuple] for friction_name, coef_tuple in friction_coef_per_second.items()}
         self.throttle_curve = throttle_curve
         self.wheel_speed = 30  # mph
-        self.crank_rpm = 3000  # hundred-RPMs
+        self.crank_rpm = 9000  # hundred-RPMs
         self.throttle_openness = 0.11  # 11 = default idle. 0 = ignition off.
-        self.clutch_lift = 0
+        self.clutch_lift = 1
         self.gear = 3
         self.rev_limiter_on = False
 
@@ -86,8 +87,8 @@ class DriveTrainSimulator:
         # create key bindings
         for i in range(10):
             self.root.bind(str(i), self.open_throttle)
-        self.root.bind('<Shift-Tab>', self.shift_up)
         self.root.bind('<Tab>', self.shift_down)
+        self.root.bind('<ISO_Left_Tab>', self.shift_up)
 
         # Line connecting vertical sliders
         self.lines = {
@@ -95,6 +96,7 @@ class DriveTrainSimulator:
             "tachometer": self.canvas.create_line(0, 0, 0, 0, width=2, fill="blue"),
             "throttle": self.canvas.create_line(0, 0, 0, 0, width=2, fill="blue"),
         }
+        print(f"{self.crank_rpm=}, {self.wheel_speed=}")
         self.take_time_step()
 
     def take_time_step(self):
@@ -112,49 +114,65 @@ class DriveTrainSimulator:
         self.ideal_crank_rpm_throttle = self.find_equilibrium_rpm(self.throttle_openness)
         # Calculate the accumulated acceleration (shortened to acc.) on individual
         # components, before accounting for the clutch.
-        wheel_external_acc = self.rolling_resistance(
+        wheel_external_acc = - self.rolling_resistance(
             self.wheel_speed, self.friction_coefs["wheel_speed"]
         )  # ignore braking for now.
         crank_external_acc = (
-            self.rolling_resistance(self.crank_rpm, self.friction_coefs["crank_rpm"])
+            - self.rolling_resistance(self.crank_rpm, self.friction_coefs["crank_rpm"])
             + self.throttle_curve(self.crank_rpm) * self.throttle_openness * (1-int(self.rev_limiter_on))
         )
+        # print(f"{self.wheel_speed=}, {wheel_external_acc=}, {self.crank_rpm=}, {crank_external_acc=}")
         # Accounting for clutch now.
-        if is_slipping:=np.isclose(self.ideal_crank_rpm, self.crank_rpm):
+        is_slipping = ~np.isclose(self.ideal_crank_rpm, self.crank_rpm)
+        if is_slipping:
+            sign = np.sign(self.ideal_crank_rpm - self.crank_rpm)
             clutch_acc_on_crank = self.clutch_force(is_slipping)
-            crank_rpm_update = crank_external_acc + clutch_acc_on_crank
-            wheel_speed_update = wheel_external_acc + clutch_acc_on_crank * current_conversion_ratio
+            crank_rpm_update = crank_external_acc + sign * clutch_acc_on_crank
+            wheel_speed_update = wheel_external_acc - sign * clutch_acc_on_crank * current_conversion_ratio
         else:
-            max_clutch_acc_on_crank = self.clutch_force(is_slipping)  # not slipping yet.
             acc_difference_on_crank = wheel_external_acc/current_conversion_ratio - crank_external_acc
+            sign = np.sign(acc_difference_on_crank) # crank RPM increase if positive.
+            max_clutch_acc_on_crank = self.clutch_force(is_slipping)  # not slipping yet.
             if abs(acc_difference_on_crank)> max_clutch_acc_on_crank:  # begin slipping.
                 max_clutch_acc_on_wheel = max_clutch_acc_on_crank * current_conversion_ratio
 
-                crank_rpm_update = crank_external_acc + np.sign(acc_difference_on_crank) * max_clutch_acc_on_crank
-                wheel_speed_update = wheel_external_acc - np.sign(acc_difference_on_crank) * max_clutch_acc_on_wheel
+                crank_rpm_update = crank_external_acc - sign * max_clutch_acc_on_crank
+                wheel_speed_update = wheel_external_acc - sign * max_clutch_acc_on_wheel
             else:  # stays attached
                 crank_rpm_update = crank_external_acc + wheel_external_acc / current_conversion_ratio
                 wheel_speed_update = wheel_external_acc + crank_external_acc * current_conversion_ratio
-        # Put in some checks to stop possible oscillatory behaviour
-        # if self.get_clutch_engaged_wheel_speed(self.wheel_speed+wheel_speed_update)
-        self.crank_rpm = np.clip(self.crank_rpm + crank_rpm_update, 0, np.inf)
-        self.wheel_speed = np.clip(self.wheel_speed + wheel_speed_update, 0, np.inf)
+
+        # Pause briefly when the ideal speed v.s. actual speeds pass each other.
+        step_size = 1.0
+        new_crank_rpm = self.crank_rpm + crank_rpm_update
+        new_ideal_crank_rpm = (self.wheel_speed + wheel_speed_update) / current_conversion_ratio
+        ideal_crank_rpm_change = new_ideal_crank_rpm - self.ideal_crank_rpm
+        if abs(np.sign(new_ideal_crank_rpm - new_crank_rpm) - np.sign(self.ideal_crank_rpm - self.crank_rpm)) == 2:
+            # crossover has occurred
+            step_size = (self.ideal_crank_rpm - self.crank_rpm)/(crank_rpm_update - ideal_crank_rpm_change) # should be less than 1.
+            if step_size>1 or step_size<0:
+                raise ValueError("Programmer error")
+
+        self.crank_rpm = np.clip(self.crank_rpm + step_size * crank_rpm_update, 0, np.inf)
+        self.wheel_speed = np.clip(self.wheel_speed + step_size * wheel_speed_update, 0, np.inf)
         self.sliders["tachometer"].set(self.crank_rpm)
         self.sliders["speedometer"].set(self.wheel_speed)
+        slip_status = "slipping" if is_slipping else "no slip-"
+        print(f"{slip_status}, step_size_taken={step_size}, wheel_speed={self.wheel_speed}, crank_rpm={self.crank_rpm}")
 
         # Changes to the clutch engagement causes the engine RPM to get pulled down more/less.
         speedo_x = (
             self.canvas.coords(self.win_idx["speedometer"])[0]
-            + self.sliders["speedometer"].winfo_width()
+            + self.sliders["speedometer"].winfo_width()/2
         )
         ideal_speed_y = self.get_y_corresponding_to_value(
             self.sliders["speedometer"], self.win_idx["speedometer"], self.ideal_wheel_speed
         )
         speed_y = self.get_y_corresponding_to_value(
-            self.sliders["speedometer"], self.win_idx["speedometer"], self.ideal_wheel_speed
+            self.sliders["speedometer"], self.win_idx["speedometer"], self.wheel_speed
         )
 
-        tacho_lx = self.canvas.coords(self.win_idx["tachometer"])[0]
+        tacho_lx = self.canvas.coords(self.win_idx["tachometer"])[0] - self.sliders["tachometer"].winfo_width()/2
         ideal_crank_y = self.get_y_corresponding_to_value(
             self.sliders["tachometer"], self.win_idx["tachometer"], self.ideal_crank_rpm
         )
@@ -162,11 +180,11 @@ class DriveTrainSimulator:
             self.sliders["tachometer"], self.win_idx["tachometer"], self.crank_rpm
         )
 
-        tacho_rx = tacho_lx + self.sliders["tachometer"].winfo_width()
+        tacho_rx = tacho_lx + self.sliders["tachometer"].winfo_width()/2
         ideal_crank_y_throttle = self.get_y_corresponding_to_value(
             self.sliders["tachometer"], self.win_idx["tachometer"], self.ideal_crank_rpm_throttle
         )
-        throttle_x = self.canvas.coords(self.win_idx["throttle"])[0]
+        throttle_x = self.canvas.coords(self.win_idx["throttle"])[0] - self.sliders["throttle"].winfo_width()/2
         throttle_y = self.get_y_corresponding_to_value(
             self.sliders["throttle"], self.win_idx["throttle"], self.throttle_openness
         )
@@ -181,7 +199,7 @@ class DriveTrainSimulator:
         else:
             self.set_background("white")
 
-        self.root.after(self.frame_dt, self.take_time_step)
+        self.root.after(int(self.frame_dt*1000), self.take_time_step)
 
     def open_throttle(self, event):
         """Change the throttle position"""
@@ -241,5 +259,6 @@ class DriveTrainSimulator:
 
 if __name__ == "__main__":
     motorcycle_throttle_curve = lambda x: -0.000000088*(x**2) * (x-13000) + 220 * abs(np.sqrt(x))
-    app = DriveTrainSimulator(tk.Tk(), FordFiesta_ratio, motorcycle_friction_coefs, motorcycle_throttle_curve)
+    app = DriveTrainSimulator(tk.Tk(), motorcycle_ratio, motorcycle_friction_coefs, motorcycle_throttle_curve)
     app.root.mainloop()
+    # app.take_time_step()
