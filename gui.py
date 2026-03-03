@@ -51,7 +51,7 @@ class DriveTrainSimulator:
         self.canvas.pack(fill="both", expand=True)
 
         self.sliders = {
-            "speedometer": ttk.Scale(root, from_=180, to=0, orient="vertical", length=250),
+            "speedometer": ttk.Scale(root, from_=65, to=0, orient="vertical", length=250),
             "tachometer": ttk.Scale(root, from_=12000, to=0, orient="vertical", length=250),
             "throttle": ttk.Scale(root, from_=1, to=0, orient="vertical", length=250),
             "clutch": ttk.Scale(root, from_=0, to=1, orient="horizontal", length=400,
@@ -137,7 +137,7 @@ class DriveTrainSimulator:
                 max_clutch_acc_on_wheel = max_clutch_acc_on_crank * current_conversion_ratio
 
                 crank_rpm_update = crank_external_acc - sign * max_clutch_acc_on_crank
-                wheel_speed_update = wheel_external_acc - sign * max_clutch_acc_on_wheel
+                wheel_speed_update = wheel_external_acc + sign * max_clutch_acc_on_wheel
             else:  # stays attached
                 crank_rpm_update = crank_external_acc + wheel_external_acc / current_conversion_ratio
                 wheel_speed_update = wheel_external_acc + crank_external_acc * current_conversion_ratio
